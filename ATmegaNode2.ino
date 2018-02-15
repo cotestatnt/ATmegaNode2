@@ -10,9 +10,9 @@
 
 #define TIMEOUT		1000
 #define wakeUpPin	2 
-#define ADDR0		  3
-#define ADDR1		  4
-#define ADDR2		  5
+#define ADDR0		  4
+#define ADDR1		  5
+#define ADDR2		  6
 
 void getRadioData(void);
 bool sendRadioData();
@@ -40,9 +40,11 @@ unsigned long RxTimeout = 0;
 RF24 radio(10,9);                   // nRF24L01(+) radio attached using Getting Started board 
 RF24Network network(radio);         // Network uses that radio
 const uint16_t master_node = 00;    // Address of the other node in Octal format
-uint16_t this_node = 05;            // Address of our node in Octal format ( 04,031, etc)
+uint16_t this_node = 01;            // Address of our node in Octal format ( 04,031, etc)
 unsigned long t1, t2;
 uint16_t device_number, battery = 0;
+
+bool Alarmed = false;
 
 
 // ***************************************************************************************************** //
@@ -58,13 +60,13 @@ void setup(){
   Serial.begin(115200);
 	Serial.println();	  
   
-  uint16_t setted_node = 2;    
-//  if(!digitalRead(ADDR0)) bitSet(setted_node, 0);
-//  if(!digitalRead(ADDR1)) bitSet(setted_node, 1);
-//  if(!digitalRead(ADDR2)) bitSet(setted_node, 2); 
-//  // Workaround octal var
-//  if(this_node != setted_node)
-//    this_node = setted_node;  
+  uint16_t setted_node = 1;    
+  if(!digitalRead(ADDR0)) bitSet(setted_node, 0);
+  if(!digitalRead(ADDR1)) bitSet(setted_node, 1);
+  if(!digitalRead(ADDR2)) bitSet(setted_node, 2); 
+  // Workaround octal var
+  if(this_node != setted_node)
+    this_node = setted_node;  
 	DEBUG_PRINT(F("Node address: ")); 
 	DEBUG_PRINTLN(this_node);
 
@@ -82,7 +84,7 @@ void setup(){
   SPI.begin();
   radio.begin();
   radio.setRetries(3, 4);  
-  //radio.setDataRate(RF24_250KBPS);
+  radio.setDataRate(RF24_250KBPS);
   network.begin(/*channel*/ 90, /*node address*/ this_node);
 
   // Set encryption key  
@@ -100,10 +102,14 @@ void setup(){
 // ***************************************************************************************************** //
 // *****************************************    LOOP   ************************************************* //
 // ***************************************************************************************************** //
+
 void loop(){  
   // Get data from nRF24L01+
   getRadioData();
-  
+
+  if (Alarmed)
+    systemStatus = ALARMED;
+    
   switch(systemStatus){
     // if system is disabled or enabled, simply set the new status byte (the master will take care about it)
     case SYS_DISABLED:
@@ -127,8 +133,9 @@ void loop(){
         DEBUG_PRINT(F("Battery mV: "));
         DEBUG_PRINTLN(battery);
         DEBUG_PRINT(F("Send ALIVE: "));
-        // Micro has resumed from deep sleep, send "alive" message to Master           
-        if( sendRadioData() ) {
+        // Micro has resumed from deep sleep, send "alive" message to Master        
+
+        if( sendRadioData()) {
           DEBUG_PRINT(F(" ..OK"));    
           systemStatus = DONE;
         }
@@ -153,15 +160,17 @@ void loop(){
         else {
           #ifdef DEBUG                 
             delay(5); 
+            t2 = micros() - t1;          
+            Serial.println(t2);  
+            delay(1);
           #endif     
           
-          t2 = micros() - t1;          
-          Serial.println(t2);  
-          delay(1);
-          
           sleepNow(SLP_8S) ;                
-          //////// Micro will be resumed here /////////          
-          t1 =  micros();
+          //////// Micro will be resumed here /////////                    
+          
+          #ifdef DEBUG                 
+            t1 =  micros();
+          #endif 
         }
       
         // Micro will be resumed from sleep at this point        
@@ -169,18 +178,30 @@ void loop(){
         break;
 
     // This state is setted from uinterrupt on pin change
+    // Send at least 3 message to master
     case ALARMED:    
-        if(millis()- RxTimeout > TIMEOUT){
-    		  RxTimeout = millis();
-    		  payload[_MsgType] = SEND_ALARM;
-    		  DEBUG_PRINT(F("\nALARM: "));
-      		if (sendRadioData())
-      			DEBUG_PRINTLN(F(" OK"));
-      		else {
-      			DEBUG_PRINTLN(F(" Fail"));			
-				    delay(100);
-      		}
+        static byte cont = 0;
+  		  payload[_MsgType] = SEND_ALARM;
+  		  DEBUG_PRINT(F("\nALARM: "));
+    		if( sendRadioData()) {
+          DEBUG_PRINT(F(" ..OK"));           
+          delay(100);          
+          cont++;
+          if(cont == 3){
+            systemStatus = DONE;
+            Alarmed = false;
+            cont = 0;
+          }
+          else
+            sleepNow(SLP_2S) ;  
         }
+        else {    
+          DEBUG_PRINT(F(" ..Fail"));    
+          #ifdef DEBUG
+            delay(10);
+          #endif                              
+          sleepNow(SLP_1S) ;                          
+        }    
         break;
   }
 }
@@ -234,14 +255,15 @@ bool sendRadioData() {
   //********************* END ENCRYPT ***************************//  
   #ifdef DEBUG
     DEBUG_PRINT("\nChiper:     ");
-    printHex(cipherText, 2*BLOCK_SIZE );
-    delay(5);
+    printHex(cipherText, BLOCK_SIZE );
   #endif 
-  
+
   RF24NetworkHeader header(/*to node*/ master_node);
   if (network.write(header, &cipherText, sizeof(cipherText)))
     TxOK = true; 
+
   return TxOK;
+  
 }
 
 
@@ -297,8 +319,11 @@ ISR (WDT_vect) {
 // Interrupt service routine for when button pressed
 void wakeUp(){  
   if ((systemStatus > 0)) {
-    DEBUG_PRINTLN(F("Interrupt..."));   // Just a handler for the pin interrupt.    
-    systemStatus = ALARMED;
+    #ifdef DEBUG
+      if(!Alarmed)
+        DEBUG_PRINTLN(F("Interrupt fired!"));      
+    #endif     
+    Alarmed = true;
   }
 } 
 
